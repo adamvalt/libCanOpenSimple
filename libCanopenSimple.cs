@@ -18,10 +18,12 @@ using System;
 using System.Collections.Generic;
 using System.Threading;
 using System.Collections.Concurrent;
-using System.Runtime.CompilerServices;
+using Peak.Can.Basic;
 
 namespace libCanopenSimple
 {
+    using TPCANHandle = System.UInt16;
+
     public enum BUSSPEED
     {
         BUS_10Kbit = 0,
@@ -60,7 +62,7 @@ namespace libCanopenSimple
         /// Construct C# Canpacket from a CanFestival message
         /// </summary>
         /// <param name="msg">A CanFestival message struct</param>
-        public canpacket(DriverInstance.Message msg,bool bridge=false)
+        public canpacket(DriverInstance.Message msg, bool bridge = false)
         {
             cob = msg.cob_id;
             len = msg.len;
@@ -115,10 +117,10 @@ namespace libCanopenSimple
     /// </summary>
     public class libCanopenSimple
     {
-
-      
+        private can_hw.pcan_usb pcan;
+        private const int SDO_DEFAULT_TIMEOUT = 5;  // timeout in second
         public debuglevel dbglevel = debuglevel.DEBUG_NONE;
-       
+
         DriverInstance driver;
 
         Dictionary<UInt16, NMTState> nmtstate = new Dictionary<ushort, NMTState>();
@@ -137,6 +139,8 @@ namespace libCanopenSimple
                 NMTState nmt = new NMTState();
                 nmtstate[x] = nmt;
             }
+
+            this.pcan = new can_hw.pcan_usb();
         }
 
         #region driverinterface
@@ -148,7 +152,8 @@ namespace libCanopenSimple
         /// <param name="comport">COM PORT number</param>
         /// <param name="speed">CAN Bit rate</param>
         /// <param name="drivername">Driver to use</param>
-        public bool open(string comport, BUSSPEED speed, string drivername)
+#if false
+        public void open(string comport, BUSSPEED speed, string drivername)
         {
 
             driver = loader.loaddriver(drivername);
@@ -166,6 +171,27 @@ namespace libCanopenSimple
 
             return true;
 
+        }
+#endif
+
+        public void open(TPCANHandle pcanHandle, TPCANBaudrate baudrate)
+        {
+            if (this.pcan.Connect(pcanHandle, baudrate))
+            {
+                this.pcan.CanRxMsgEvent += this.Driver_pcan_rxmessage;
+                this.threadrun = true;
+                Thread thread = new Thread(new ThreadStart(this.asyncprocess));
+                thread.Name = "CANopen worker";
+                thread.Start();
+                if (connectionevent != null)
+                {
+                    connectionevent(this, new ConnectionChangedEventArgs(true));
+                }
+            }
+            else
+            {
+                throw new Exception("Unable to connect to CAN adapter");
+            }
         }
 
         public Dictionary<string, List<string>> ports = new Dictionary<string, List<string>>();
@@ -187,7 +213,7 @@ namespace libCanopenSimple
             }
 
             DriverInstance di = drivers[drivername];
-            
+
             di.enumerate();
             ports[drivername] = DriverInstance.ports;
 
@@ -199,18 +225,23 @@ namespace libCanopenSimple
         /// <returns>true = driver open and ready to use</returns>
         public bool isopen()
         {
+#if false
             if (driver == null)
                 return false;
 
             return driver.isOpen();
+#else
+            return this.pcan.bConnected;
+#endif
         }
 
         /// <summary>
         /// Send a Can packet on the bus
         /// </summary>
         /// <param name="p"></param>
-        public void SendPacket(canpacket p, bool bridge=false)
+        public void SendPacket(canpacket p, bool bridge = false)
         {
+#if false
             DriverInstance.Message msg = p.ToMsg();
 
             driver.cansend(msg);
@@ -219,30 +250,53 @@ namespace libCanopenSimple
             {
                 Driver_rxmessage(msg,bridge);
             }
+#else
+            if (this.pcan.bConnected)
+            {
+                UInt32 can_id = p.cob;
+                byte[] data = new byte[p.len];
+                Array.Copy(p.data, data, p.len);
+                this.pcan.SendStandard(can_id, data);
+            }
+#endif
         }
 
         /// <summary>
         /// Recieved message callback handler
         /// </summary>
         /// <param name="msg">CanOpen message recieved from the bus</param>
-        private void Driver_rxmessage(DriverInstance.Message msg,bool bridge=false)
+        private void Driver_rxmessage(DriverInstance.Message msg, bool bridge = false)
         {
-            packetqueue.Enqueue(new canpacket(msg,bridge));
+            packetqueue.Enqueue(new canpacket(msg, bridge));
         }
 
+
+        private void Driver_pcan_rxmessage(object sender, can_hw.CanRxMsgArgs e)
+        {
+            canpacket newPacket = new canpacket();
+            newPacket.cob = Convert.ToUInt16(e.msgId & 0x0000FFFF);
+            newPacket.len = e.len;
+            newPacket.data = new byte[e.len];
+            Array.Copy(e.data, newPacket.data, e.len);
+            packetqueue.Enqueue(newPacket);
+        }
 
         /// <summary>
         /// Close the CanOpen CanFestival driver
         /// </summary>
         public void close()
         {
+            this.pcan.CanRxMsgEvent -= this.Driver_pcan_rxmessage;
             threadrun = false;
 
+#if false
             if (driver == null)
                 return;
 
             driver.close();
-
+#else
+            this.pcan.Disconnect();
+#endif
             if (connectionevent != null) connectionevent(this, new ConnectionChangedEventArgs(false));
         }
 
@@ -267,7 +321,7 @@ namespace libCanopenSimple
         public delegate void NMTECEvent(canpacket p, DateTime dt);
         public event NMTECEvent nmtecevent;
 
-        public delegate void PDOEvent(canpacket[] p,DateTime dt);
+        public delegate void PDOEvent(canpacket[] p, DateTime dt);
         public event PDOEvent pdoevent;
 
         public delegate void EMCYEvent(canpacket p, DateTime dt);
@@ -307,7 +361,7 @@ namespace libCanopenSimple
                 canpacket cp;
                 List<canpacket> pdos = new List<canpacket>();
 
-                while (threadrun && packetqueue.IsEmpty && pdos.Count==0 && sdo_queue.Count==0 && SDO.isEmpty())
+                while (threadrun && packetqueue.IsEmpty && pdos.Count == 0 && sdo_queue.Count == 0 && SDO.isEmpty())
                 {
                     System.Threading.Thread.Sleep(0);
                 }
@@ -317,7 +371,7 @@ namespace libCanopenSimple
 
                     if (cp.bridge == false)
                     {
-                        if(packetevent!=null)
+                        if (packetevent != null)
                             packetevent(cp, DateTime.Now);
                     }
 
@@ -354,7 +408,7 @@ namespace libCanopenSimple
                     if (cp.cob >= 0x600 && cp.cob < 0x680)
                     {
                         if (sdoevent != null)
-                            sdoevent(cp,DateTime.Now);
+                            sdoevent(cp, DateTime.Now);
                     }
 
                     //NMT
@@ -405,7 +459,7 @@ namespace libCanopenSimple
                 if (pdos.Count > 0)
                 {
                     if (pdoevent != null)
-                        pdoevent(pdos.ToArray(),DateTime.Now);
+                        pdoevent(pdos.ToArray(), DateTime.Now);
                 }
 
                 SDO.kick_SDO();
@@ -577,11 +631,11 @@ namespace libCanopenSimple
         /// <param name="udata">byte[] of data (1-8 bytes) to send</param>
         /// <param name="completedcallback">Call back on finished/error event</param>
         /// <returns>SDO class that is used to perform the packet handshake, contains error/status codes</returns>
-        public SDO SDOwrite(byte node, UInt16 index, byte subindex, byte[] data, Action<SDO> completedcallback)
+        public SDO SDOwrite(byte node, UInt16 index, byte subindex, byte[] data, Action<SDO> completedcallback, int timeout = SDO_DEFAULT_TIMEOUT)
         {
 
-            SDO sdo = new SDO(this, node, index, subindex, SDO.direction.SDO_WRITE, completedcallback, data);
-            lock(sdo_queue)
+            SDO sdo = new SDO(this, node, index, subindex, SDO.direction.SDO_WRITE, completedcallback, data, timeout: timeout);
+            lock (sdo_queue)
                 sdo_queue.Enqueue(sdo);
             return sdo;
         }
@@ -594,9 +648,9 @@ namespace libCanopenSimple
         /// <param name="subindex">Object Dictionary sub index</param>
         /// <param name="completedcallback">Call back on finished/error event</param>
         /// <returns>SDO class that is used to perform the packet handshake, contains returned data and error/status codes</returns>
-        public SDO SDOread(byte node, UInt16 index, byte subindex, Action<SDO> completedcallback)
+        public SDO SDOread(byte node, UInt16 index, byte subindex, Action<SDO> completedcallback, int timeout = SDO_DEFAULT_TIMEOUT)
         {
-            SDO sdo = new SDO(this, node, index, subindex, SDO.direction.SDO_READ, completedcallback, null);
+            SDO sdo = new SDO(this, node, index, subindex, SDO.direction.SDO_READ, completedcallback, null, timeout: timeout);
             lock (sdo_queue)
                 sdo_queue.Enqueue(sdo);
             return sdo;

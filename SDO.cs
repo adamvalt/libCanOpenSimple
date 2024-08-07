@@ -64,18 +64,21 @@ namespace libCanopenSimple
         public bool expitided = false;
 
         public int returnlen = 0;
+        public bool bTimedOut { private set; get; }
 
         static List<SDO> activeSDO = new List<SDO>();
 
         private Action<SDO> completedcallback;
-      
-      
+
+
         private direction dir;
-      
+
         private UInt32 totaldata;
         private libCanopenSimple can;
         private bool lasttoggle = false;
         private DateTime timeout;
+        private const int TIMEOUT_DEFAULT_SEC = 5;
+        private int defaultTimeout = TIMEOUT_DEFAULT_SEC; // Seconds
         private ManualResetEvent finishedevent;
         private debuglevel dbglevel;
 
@@ -90,7 +93,7 @@ namespace libCanopenSimple
         /// <param name="dir">Direction of transfer</param>
         /// <param name="completedcallback">Optional, completed callback (or null if not required)</param>
         /// <param name="databuffer">A byte array of data to be transfered to or from if more than 4 bytes</param>
-        public SDO(libCanopenSimple can, byte node, UInt16 index, byte subindex, direction dir, Action<SDO> completedcallback, byte[] databuffer)
+        public SDO(libCanopenSimple can, byte node, UInt16 index, byte subindex, direction dir, Action<SDO> completedcallback, byte[] databuffer, int timeout = TIMEOUT_DEFAULT_SEC)
         {
             this.can = can;
             this.index = index;
@@ -99,6 +102,7 @@ namespace libCanopenSimple
             this.dir = dir;
             this.completedcallback = completedcallback;
             this.databuffer = databuffer;
+            this.defaultTimeout = timeout;
 
             finishedevent = new ManualResetEvent(false);
             state = SDO_STATE.SDO_INIT;
@@ -166,7 +170,7 @@ namespace libCanopenSimple
             if (state != SDO_STATE.SDO_INIT && DateTime.Now > timeout)
             {
                 state = SDO_STATE.SDO_ERROR;
-
+                this.bTimedOut = true;
                 Console.WriteLine("SDO Timeout Error on {0:x4}/{1:x2} {2:x8}", this.index, this.subindex, expitideddata);
 
                 if (completedcallback != null)
@@ -177,7 +181,8 @@ namespace libCanopenSimple
 
             if (state == SDO_STATE.SDO_INIT)
             {
-                timeout = DateTime.Now + new TimeSpan(0, 0, 1);
+                timeout = DateTime.Now + new TimeSpan(0, 0, this.defaultTimeout);
+                this.bTimedOut = false;
                 state = SDO_STATE.SDO_SENT;
 
                 if (dir == direction.SDO_READ)
@@ -265,7 +270,7 @@ namespace libCanopenSimple
             if (dbglevel == debuglevel.DEBUG_ALL)
                 Console.WriteLine(String.Format("Sending a new SDO packet: {0}", p.ToString()));
 
-            if(can.isopen())
+            if (can.isopen())
                 can.SendPacket(p);
         }
 
@@ -314,7 +319,7 @@ namespace libCanopenSimple
 
             int n = (0x03 & (cp.data[0] >> 2)); //3-2 data size for normal packets
 
-            returnlen = 8*(4-n);
+            returnlen = 8 * (4 - n);
 
             int e = (0x01 & (cp.data[0] >> 1)); // expidited flag
             int s = (cp.data[0] & 0x01); // data size set flag
@@ -438,7 +443,7 @@ namespace libCanopenSimple
             if (SCS == 0x00)
             {
 
-               // Console.WriteLine("RX Segmented transfer update length is {0} -- {1}", scount, totaldata);
+                // Console.WriteLine("RX Segmented transfer update length is {0} -- {1}", scount, totaldata);
 
                 for (int x = 0; x < scount; x++)
                 {
@@ -472,7 +477,7 @@ namespace libCanopenSimple
         private void requestNextSegment(bool toggle)
         {
 
-            timeout = DateTime.Now + new TimeSpan(0, 0, 1);
+            timeout = DateTime.Now + new TimeSpan(0, 0, this.defaultTimeout);
 
             if (dir == direction.SDO_READ)
             {
